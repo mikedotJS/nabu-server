@@ -1,4 +1,7 @@
 const net = require("net");
+require("dotenv").config();
+
+const PORT = process.env.PORT;
 
 class Server {
   constructor(port) {
@@ -254,5 +257,5 @@ class Server {
   }
 }
 
-const server = new Server(3000); // Default port
+const server = new Server(PORT); // Default port
 server.start();

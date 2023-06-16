@@ -1,0 +1,25 @@
+# Logs
+logs
+*.log
+
+# Node.js dependencies
+node_modules
+
+# Generated files
+dist
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Build files
+build
+
+# Mac-specific files
+.DS_Store
+
+# User-specific files
+.idea
+*.iml
+*.swp
