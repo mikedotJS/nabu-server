@@ -1,4 +1,4 @@
-const net = require("net");
+const WebSocket = require("ws");
 require("dotenv").config();
 
 const PORT = process.env.PORT;
@@ -8,14 +8,18 @@ class Server {
     this.port = port;
     this.clients = [];
     this.channels = {};
+    this.messageCounter = 1; // Track the message count
+    this.messages = [];
   }
 
   start() {
-    const server = net.createServer((socket) => {
+    const server = new WebSocket.Server({ port: this.port });
+
+    server.on("connection", (socket) => {
       const client = this.createClient(socket);
       this.clients.push(client);
 
-      socket.on("data", (data) => {
+      socket.on("message", (data) => {
         const message = data.toString().trim();
 
         if (client.username === null) {
@@ -25,7 +29,7 @@ class Server {
         }
       });
 
-      socket.on("end", () => {
+      socket.on("close", () => {
         this.handleDisconnect(client);
       });
 
@@ -34,9 +38,7 @@ class Server {
       });
     });
 
-    server.listen(this.port, () => {
-      console.log(`Server is listening on port ${this.port}`);
-    });
+    console.log(`Server is listening on port ${this.port}`);
   }
 
   createClient(socket) {
@@ -52,16 +54,14 @@ class Server {
     const trimmedUsername = username.trim();
 
     if (this.isUsernameTaken(trimmedUsername)) {
-      client.socket.write(
+      client.socket.send(
         "Username is already taken. Please choose a different username.\n"
       );
       return;
     }
 
     client.username = trimmedUsername;
-    client.socket.write(
-      `Welcome, ${client.username}! You are now connected.\n`
-    );
+    client.socket.send(`Welcome, ${client.username}! You are now connected.\n`);
     this.sendAvailableCommands(client);
   }
 
@@ -76,12 +76,12 @@ class Server {
       "/quit - Disconnect from the server",
     ];
 
-    client.socket.write("Available commands:\n");
+    client.socket.send("Available commands:\n");
     commands.forEach((command) => {
-      client.socket.write(`- ${command}\n`);
+      client.socket.send(`- ${command}\n`);
     });
 
-    client.socket.write("Enter a command: ");
+    client.socket.send("Enter a command: ");
   }
 
   isUsernameTaken(username) {
@@ -106,7 +106,7 @@ class Server {
         this.handleReply(client, args.join(" "));
         break;
       case "/react":
-        this.handleReaction(client, args[0]);
+        this.handleReaction(client, args[0], args[1]);
         break;
       case "/channels":
         this.handleChannels(client);
@@ -122,9 +122,7 @@ class Server {
 
   handleJoin(client, channelName) {
     if (client.channel) {
-      client.socket.write(
-        `You are already in the ${client.channel} channel.\n`
-      );
+      client.socket.send(`You are already in the ${client.channel} channel.\n`);
       return;
     }
 
@@ -135,8 +133,8 @@ class Server {
     client.channel = channelName;
     this.channels[channelName].push(client);
 
-    client.socket.write(`You joined the channel: ${channelName}\n`);
-    client.socket.write(
+    client.socket.send(`You joined the channel: ${channelName}\n`);
+    client.socket.send(
       `To leave the channel, use the command: /leave ${channelName}\n`
     );
 
@@ -145,7 +143,7 @@ class Server {
 
   handleLeave(client) {
     if (!client.channel) {
-      client.socket.write("You are not in any channel.\n");
+      client.socket.send("You are not in any channel.\n");
       return;
     }
 
@@ -155,11 +153,72 @@ class Server {
       channelClients.splice(index, 1);
     }
 
-    client.socket.write(`You left the channel: ${client.channel}\n`);
-    client.socket.write("Enter a command: ");
+    client.socket.send(`You left the channel: ${client.channel}\n`);
+    client.socket.send("Enter a command: ");
 
     console.log(`User ${client.username} left the ${client.channel} channel`);
     client.channel = null;
+  }
+
+  handleReply(client, message) {
+    if (client.lastMessageSender) {
+      this.handlePrivateMessage(client, client.lastMessageSender, message);
+    } else {
+      client.socket.send("No previous private message sender found.\n");
+    }
+  }
+
+  findMessageById(messageId) {
+    const message = this.messages.find((msg) => msg.id === messageId);
+    if (message) {
+      return message;
+    }
+    return null;
+  }
+
+  handleReaction(client, messageId, emoji) {
+    const message = this.findMessageById(messageId);
+
+    if (!message) {
+      client.socket.send(`Message '${messageId}' not found.\n`);
+      return;
+    }
+
+    const channelClients = this.channels[message.channel];
+    if (!channelClients.includes(client)) {
+      client.socket.send("You are not in the same channel as the message.\n");
+      return;
+    }
+
+    if (message.reactions == null) message.reactions = [];
+
+    message.reactions.push({ emoji, username: client.username });
+
+    const reactedMessage = `${message.channel}: [${messageId}] ${message.sender}: ${message.text}`;
+    const reactionMessage = `${client.username} reacted with ${emoji} to the message: ${reactedMessage}`;
+
+    // Broadcast the reaction to all clients in the channel
+    channelClients.forEach((channelClient) => {
+      channelClient.socket.send(`${reactionMessage}\n`);
+    });
+
+    console.log(reactionMessage);
+  }
+
+  handleQuit(client) {
+    client.socket.send("Goodbye! Disconnecting from the server.\n");
+    client.socket.close();
+    this.removeClient(client);
+  }
+
+  getAllMessages() {
+    return this.messages;
+  }
+
+  generateMessageId() {
+    const messageId = this.messageCounter.toString();
+    this.messageCounter++;
+    return messageId;
   }
 
   handlePrivateMessage(sender, recipient, message) {
@@ -168,15 +227,15 @@ class Server {
     );
 
     if (!recipientClient) {
-      sender.socket.write(`User '${recipient}' not found.\n`);
+      sender.socket.send(`User '${recipient}' not found.\n`);
       return;
     }
 
-    recipientClient.socket.write(`(private) ${sender.username}: ${message}\n`);
-    sender.socket.write(`(private) to ${recipient}: ${message}\n`);
+    recipientClient.socket.send(`(private) ${sender.username}: ${message}\n`);
+    sender.socket.send(`(private) to ${recipient}: ${message}\n`);
 
     recipientClient.lastMessageSender = sender.username;
-    recipientClient.socket.write("Enter a command: ");
+    recipientClient.socket.send("Enter a command: ");
 
     console.log(
       `User ${sender.username} sent a private message to ${recipient}`
@@ -185,13 +244,14 @@ class Server {
 
   handleChannelMessage(client, message) {
     if (!client.channel) {
-      client.socket.write(
-        "You are not in any channel. Join a channel first.\n"
-      );
+      client.socket.send("You are not in any channel. Join a channel first.\n");
       return;
     }
 
     const channelClients = this.channels[client.channel];
+
+    // Generate a unique message ID
+    const messageId = this.generateMessageId();
 
     // Extract the mentioned usernames from the message
     const mentionedUsernames = message.match(/@(\w+)/g);
@@ -201,21 +261,30 @@ class Server {
           (c) => c.username === mentionedUsername.substring(1)
         );
         if (mentionedClient) {
-          mentionedClient.socket.write(
+          mentionedClient.socket.send(
             `[MENTION] ${client.username}: ${message}\n`
           );
         }
       });
     }
 
-    // Broadcast the message to all clients in the channel
+    // Broadcast the message with the message ID to all clients in the channel
     channelClients.forEach((channelClient) => {
-      channelClient.socket.write(
-        `${client.channel}: ${client.username}: ${message}\n`
+      channelClient.socket.send(
+        `${client.channel}: [${messageId}] ${client.username}: ${message}\n`
       );
     });
 
     client.lastMessage = message;
+
+    // Store the message in the server's messages array
+    const messageData = {
+      id: messageId,
+      sender: client.username,
+      channel: client.channel,
+      text: message,
+    };
+    this.messages.push(messageData);
 
     console.log(
       `User ${client.username} sent a message to the ${client.channel} channel`
@@ -245,15 +314,15 @@ class Server {
     const channelNames = Object.keys(this.channels);
 
     if (channelNames.length === 0) {
-      client.socket.write("No channels available.\n");
+      client.socket.send("No channels available.\n");
     } else {
-      client.socket.write("Available channels:\n");
+      client.socket.send("Available channels:\n");
       channelNames.forEach((channelName) => {
-        client.socket.write(`- ${channelName}\n`);
+        client.socket.send(`- ${channelName}\n`);
       });
     }
 
-    client.socket.write("Enter a command: ");
+    client.socket.send("Enter a command: ");
   }
 }
 
